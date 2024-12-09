@@ -309,7 +309,12 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    int TargetFPS = atoi(argv[1]);
+    FpsValue = atoi(argv[1]);
+    if(FpsValue < 60 || FpsValue > 240)
+    {
+        fprintf(stderr, "usage: \"%s\" target-fps /path/to/genshin/exe [args]\n", argv[0]);
+        return 1;
+    }
     const char* ProcessPath = argv[2];
 
     if (strlen(ProcessPath) < 12) // min(strlen(YuanShen.exe), strlen(GenshinImpact.exe))
@@ -503,30 +508,13 @@ __offset_ok:
     printf("Done\n\n");
 
     DWORD dwExitCode = STILL_ACTIVE;
-    uint32_t fps = 0;
     while (dwExitCode == STILL_ACTIVE)
     {
         GetExitCodeProcess(pi.hProcess, &dwExitCode);
-
-        // 每两秒检查一次
         Sleep(2000);
-        int fps = 0;
-        ReadProcessMemory(pi.hProcess, (LPVOID)pfps, &fps, sizeof(fps), NULL);
-        if (fps == -1)
-            continue;
-        if (fps != TargetFPS)
-        {
-            WriteProcessMemory(pi.hProcess, (LPVOID)pfps, &TargetFPS, sizeof(TargetFPS), NULL);
-            //热修补循环
-            WriteProcessMemory(pi.hProcess, (LPVOID)Patch_ptr, &TargetFPS, 4, NULL);
-        }
-            
-
-
     }
 
     CloseHandle(pi.hProcess);
-    TerminateProcess((HANDLE)-1, 0);
 
     return 0;
 }
