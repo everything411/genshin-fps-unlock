@@ -5,26 +5,17 @@
 #define KEY_DECREASE_SMALL VK_LEFT
 #define FPS_TARGET 120
 
-#include <Windows.h>
-#include <TlHelp32.h>
-#include <vector>
-#include <string>
-#include <thread>
-#include <Psapi.h>
-#include "inireader.h"
+#include <windows.h>
+#include <psapi.h>
+#include <tlhelp32.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-std::string GamePath{};
 int FpsValue = FPS_TARGET;
 
-DWORD StartPriority = 0;
-const std::vector<DWORD> PrioityClass = {
-   REALTIME_PRIORITY_CLASS,
-   HIGH_PRIORITY_CLASS,
-   ABOVE_NORMAL_PRIORITY_CLASS,
-   NORMAL_PRIORITY_CLASS,
-   BELOW_NORMAL_PRIORITY_CLASS,
-   IDLE_PRIORITY_CLASS
-};
 //credit by winTEuser
 const BYTE _shellcode_genshin_Const[] =
 {
@@ -129,35 +120,37 @@ const BYTE _shellcode_genshin_Const[] =
 
 
 // 特征搜索 winTEuser
+int* pattern_to_byte(const char* pattern, int *ppos)
+{
+    static int bytes[1024];
+    int bytes_pos = 0;
+    const char* start = pattern;
+    const char* end = pattern + strlen(pattern);
+
+    for (const char* current = start; current < end; ++current) {
+        if (*current == '?') {
+            ++current;
+            if (*current == '?')
+                ++current;
+            bytes[bytes_pos++] = -1;
+        }
+        else {
+            bytes[bytes_pos++] = strtoul(current, (char**)&current, 16);
+        }
+    }
+    *ppos = bytes_pos;
+    return bytes;
+};
 static uintptr_t PatternScan_Region(uintptr_t startAddress, size_t regionSize, const char* signature)
 {
-    auto pattern_to_byte = [](const char* pattern)
-    {
-        std::vector<int> bytes;
-        const char* start = pattern;
-        const char* end = pattern + strlen(pattern);
+    int patternBytessize = 0;
+    int* patternBytes = pattern_to_byte(signature, &patternBytessize);
+    uint8_t* scanBytes = (uint8_t*)startAddress;
 
-        for (const char* current = start; current < end; ++current) {
-            if (*current == '?') {
-                ++current;
-                if (*current == '?')
-                    ++current;
-                bytes.push_back(-1);
-            }
-            else {
-                bytes.push_back(strtoul(current, const_cast<char**>(&current), 16));
-            }
-        }
-        return bytes;
-    };
-
-    std::vector<int> patternBytes = pattern_to_byte(signature);
-    auto scanBytes = reinterpret_cast<std::uint8_t*>(startAddress);
-
-    for (size_t i = 0; i < regionSize - patternBytes.size(); ++i)
+    for (size_t i = 0; i < regionSize - patternBytessize; ++i)
     {
         bool found = true;
-        for (size_t j = 0; j < patternBytes.size(); ++j) {
+        for (size_t j = 0; j < patternBytessize; ++j) {
             if (scanBytes[i + j] != patternBytes[j] && patternBytes[j] != -1) {
                 found = false;
                 break;
@@ -170,22 +163,23 @@ static uintptr_t PatternScan_Region(uintptr_t startAddress, size_t regionSize, c
     return 0;
 }
 
-std::string GetLastErrorAsString(DWORD code)
+const char *GetLastErrorAsString(DWORD code)
 {
-    LPSTR buf = nullptr;
+    LPSTR buf = NULL;
     FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&buf, 0, NULL);
-    std::string ret = buf;
+    static char ret[4096];
+    strcpy(ret, buf);
     LocalFree(buf);
     return ret;
 }
 
-static bool GetModule(DWORD pid, std::string ModuleName, PMODULEENTRY32 pEntry)
+static bool GetModule(DWORD pid, const char *ModuleName, PMODULEENTRY32 pEntry)
 {
     if (!pEntry)
         return false;
 
-    MODULEENTRY32 mod32{};
+    MODULEENTRY32 mod32 = {};
     mod32.dwSize = sizeof(mod32);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
     bool temp = Module32First(snap, &mod32);
@@ -197,7 +191,7 @@ static bool GetModule(DWORD pid, std::string ModuleName, PMODULEENTRY32 pEntry)
             {
                 break;
             }
-            if (mod32.szModule == ModuleName)
+            if (!strcmp(mod32.szModule, ModuleName))
             {
                 *pEntry = mod32;
                 CloseHandle(snap);
@@ -211,15 +205,15 @@ static bool GetModule(DWORD pid, std::string ModuleName, PMODULEENTRY32 pEntry)
     return 0;
 }
 // 通过进程名搜索进程ID
-DWORD GetPID(std::string ProcessName)
+DWORD GetPID(const char* ProcessName)
 {
     DWORD pid = 0;
-    PROCESSENTRY32 pe32{};
+    PROCESSENTRY32 pe32 = {};
     pe32.dwSize = sizeof(pe32);
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     for (Process32First(snap, &pe32); Process32Next(snap, &pe32);)
     {
-        if (pe32.szExeFile == ProcessName)
+        if (!strcmp(pe32.szExeFile, ProcessName))
         {
             pid = pe32.th32ProcessID;
             break;
@@ -229,25 +223,6 @@ DWORD GetPID(std::string ProcessName)
     return pid;
 }
 
-bool WriteConfig(std::string GamePath, int fps)
-{
-    HANDLE hFile = CreateFileA("fps_config.ini", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_HIDDEN, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE)
-    {
-        DWORD code = GetLastError();
-        printf("CreateFileA failed (%d): %s\n", code, GetLastErrorAsString(code).c_str());
-        return false;
-    }
-
-    std::string content{};
-    content = "[Setting]\n";
-    content += "Path=" + GamePath + "\n";
-    content += "FPS=" + std::to_string(fps);
-
-    DWORD written = 0;
-    WriteFile(hFile, content.data(), content.size(), &written, nullptr);
-    CloseHandle(hFile);
-}
 //Hotpatch
 static DWORD64 inject_patch(LPVOID text_buffer, DWORD text_size, DWORD64 _text_baseaddr, uint64_t _ptr_fps, HANDLE Tar_handle)
 {
@@ -325,157 +300,68 @@ __Get_fpsSet_addr:
     }
 }
 
-void LoadConfig()
-{
-    if (GetFileAttributesA("config") != INVALID_FILE_ATTRIBUTES)
-        DeleteFileA("config");
 
-    INIReader reader("fps_config.ini");
-    if (reader.ParseError() != 0)
-    {
-        printf("配置不存在\n请不要关闭此进程 - 然后手动开启游戏\n这只需要进行一次 - 用于获取游戏路经\n");
-        printf("\n等待游戏启动...\n");
-
-        DWORD pid = 0;
-        while (!(pid = GetPID("YuanShen.exe")) && !(pid = GetPID("GenshinImpact.exe")))
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        // 获取进程句柄 - 这权限很低的了 - 不应该获取不了
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_TERMINATE, FALSE, pid);
-        if (!hProcess)
-        {
-            DWORD code = GetLastError();
-            printf("OpenProcess failed (%d): %s", code, GetLastErrorAsString(code).c_str());
-            return;
-        }
-
-        char szPath[MAX_PATH]{};
-        DWORD length = sizeof(szPath);
-        QueryFullProcessImageNameA(hProcess, 0, szPath, &length);
-
-        GamePath = szPath;
-        WriteConfig(GamePath, FpsValue);
-
-        HWND hwnd = nullptr;
-        while (!(hwnd = FindWindowA("UnityWndClass", nullptr)))
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        DWORD ExitCode = STILL_ACTIVE;
-        while (ExitCode == STILL_ACTIVE)
-        {
-            SendMessageA(hwnd, WM_CLOSE, 0, 0);
-            GetExitCodeProcess(hProcess, &ExitCode);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        }
-
-        // wait for the game to close then continue
-        WaitForSingleObject(hProcess, -1);
-        CloseHandle(hProcess);
-
-        system("cls");
-        return;
-    }
-
-    GamePath = reader.Get("Setting", "Path", "");
-    FpsValue = reader.GetInteger("Setting", "FPS", FpsValue);
-
-    if (GetFileAttributesA(GamePath.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        printf("配置里的游戏路经改变了 - 开始重新配置\n");
-        DeleteFileA("config.ini");
-        LoadConfig();
-    }
-}
-
-// 热键线程
-DWORD __stdcall Thread1(LPVOID p)
-{
-    if (!p)
-        return 0;
-
-    int* pTargetFPS = (int*)p;
-    int fps = *pTargetFPS;
-    int prev = fps;
-    while (true)
-    {
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        if (GetAsyncKeyState(KEY_DECREASE) & 1 && GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-            fps -= 20;
-        if (GetAsyncKeyState(KEY_DECREASE_SMALL) & 1 && GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-            fps -= 2;
-        if (GetAsyncKeyState(KEY_INCREASE) & 1 && GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-            fps += 20;
-        if (GetAsyncKeyState(KEY_INCREASE_SMALL) & 1 && GetAsyncKeyState(VK_RCONTROL) & 0x8000)
-            fps += 2;
-        if (GetAsyncKeyState(KEY_TOGGLE) & 1)
-            fps = fps != 60 ? 60 : prev;
-        if (prev != fps)
-            WriteConfig(GamePath, fps);
-        if (fps > 60)
-            prev = fps;
-        if (fps < 60)
-            fps = 60;
-        printf("\rFPS: %d - %s    ", fps, fps > 60 ? "ON" : "OFF");
-        *pTargetFPS = fps;
-    }
-
-    return 0;
-}
 int main(int argc, char** argv)
 {
-    std::atexit([] {
-        system("pause");
-    });
-
-    SetConsoleTitleA("");
-    
-    std::string CommandLine{};
-    if (argc > 1)
+    if (argc < 3)
     {
-        for (int i = 1; i < argc; i++)
-            CommandLine += argv[i] + std::string(" ");
+        fprintf(stderr, "usage: \"%s\" target-fps /path/to/genshin/exe [args]\n", argv[0]);
+        return 1;
     }
 
-    // 读取配置
-    LoadConfig();
-    int TargetFPS = FpsValue;
-    std::string ProcessPath = GamePath;
-    std::string ProcessDir{};
+    int TargetFPS = atoi(argv[1]);
+    const char* ProcessPath = argv[2];
 
-    if (ProcessPath.length() < 8)
-        return 0;
-
-    printf("FPS解锁 好用的话点个star吧 4.8\n");
-    printf("https://github.com/xiaonian233/genshin-fps-unlock \n特别感谢winTEuser老哥 \n");
-    printf("游戏路经: %s\n\n", ProcessPath.c_str());
-    ProcessDir = ProcessPath.substr(0, ProcessPath.find_last_of("\\"));
-    std::string procname = ProcessPath.substr(ProcessPath.find_last_of("\\") + 1);
-
-    DWORD pid = GetPID(procname);
-    if (pid)
+    if (strlen(ProcessPath) < 12) // min(strlen(YuanShen.exe), strlen(GenshinImpact.exe))
     {
-        printf("检测到游戏已在运行！\n");
-        printf("手动启动游戏会导致失效的\n");
-        printf("请手动关闭游戏 - 解锁器会自动启动游戏\n");
-        return 0;
+        fprintf(stderr, "usage: \"%s\" target-fps /path/to/genshin/exe [args]\n", argv[0]);
+        return 1;
     }
 
-    STARTUPINFOA si{};
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessA(ProcessPath.c_str(), (LPSTR)CommandLine.c_str(), nullptr, nullptr, FALSE, 0, nullptr, ProcessDir.c_str(), &si, &pi))
+    printf("Credits to winTEuser and xiaonian233\n");
+
+    const char* procname;
+
+    if(strstr(ProcessPath, "YuanShen.exe"))
+        procname = "YuanShen.exe";
+    else if(strstr(ProcessPath, "GenshinImpact.exe"))
+        procname = "GenshinImpact.exe";
+    else
+    {
+        fprintf(stderr, "usage: \"%s\" target-fps /path/to/genshin/exe [args]\n", argv[0]);
+        return 1;
+    }
+
+    char *ProcessDir = strdup(ProcessPath);
+    *strstr(ProcessDir, procname) = 0;
+
+    char* cmdline = calloc(1, 4096);
+    char* tmpcmdline = calloc(1, 4096);
+    sprintf(cmdline, "\"%s\"", procname);
+    for(int i = 3; i < argc; i++)
+    {
+        if (strchr(argv[i], ' '))
+            sprintf(tmpcmdline, " \"%s\"", argv[i]);
+        else
+            sprintf(tmpcmdline, " %s", argv[i]);
+        strcat(cmdline, tmpcmdline);
+    }
+    printf("call %s with args \"%s\" in %s\n", ProcessPath, cmdline, ProcessDir);
+
+    STARTUPINFOA si = {};
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(ProcessPath, cmdline, NULL, NULL, FALSE, 0, NULL, ProcessDir, &si, &pi))
     {
         DWORD code = GetLastError();
-        printf("CreateProcess failed (%d): %s", code, GetLastErrorAsString(code).c_str());
-        return 0;
+        printf("CreateProcess failed (%d): %s", code, GetLastErrorAsString(code));
+        return 2;
     }
 
     CloseHandle(pi.hThread);
     printf("PID: %d\n", pi.dwProcessId);
     Sleep(200);
-    StartPriority = PrioityClass[1];
-    SetPriorityClass(pi.hProcess, StartPriority);
     // 等待UnityPlayer.dll加载和获取DLL信息
-    MODULEENTRY32 hUnityPlayer{};
+    MODULEENTRY32 hUnityPlayer = {};
     {
         DWORD times = 1000;
         while (times != 0)
@@ -531,8 +417,8 @@ __get_procbase_ok:
     uint64_t tar_sec = *(uint64_t*)&search_sec;
     uintptr_t WinPEfileVA = *(uintptr_t*)(&_mbase_PE_buffer) + 0x3c; //dos_header
     uintptr_t PEfptr = *(uintptr_t*)(&_mbase_PE_buffer) + *(uint32_t*)WinPEfileVA; //get_winPE_VA
-    _IMAGE_NT_HEADERS64 _FilePE_Nt_header = *(_IMAGE_NT_HEADERS64*)PEfptr;
-    _IMAGE_SECTION_HEADER _sec_temp{};
+    struct _IMAGE_NT_HEADERS64 _FilePE_Nt_header = *(struct _IMAGE_NT_HEADERS64*)PEfptr;
+    struct _IMAGE_SECTION_HEADER _sec_temp = {};
     uintptr_t Text_Remote_RVA;
     uint32_t Text_Vsize;
     if (_FilePE_Nt_header.Signature == 0x00004550)
@@ -542,7 +428,7 @@ __get_procbase_ok:
         DWORD target_sec_VA_start = 0;
         while (num)
         {
-            _sec_temp = *(_IMAGE_SECTION_HEADER*)(PEfptr + 264 + (40 * (static_cast<unsigned long long>(sec_num) - num)));
+            _sec_temp = *(struct _IMAGE_SECTION_HEADER*)(PEfptr + 264 + (40 * ((unsigned long long)(sec_num) - num)));
 
             //printf_s("sec_%d_is:  %s\n", sec_num - num, _sec_temp.Name);
 
@@ -606,7 +492,7 @@ __offset_ok:
     uintptr_t Patch_ptr = 0;
     {
         Patch_ptr = inject_patch(Copy_Text_VA, Text_Vsize, Text_Remote_RVA, pfps, pi.hProcess);//patch inject 
-        if (Patch_ptr == NULL)
+        if (Patch_ptr == (uintptr_t)NULL)
         {
             printf_s("Inject Patch Fail!\n\n");
         }
@@ -615,16 +501,6 @@ __offset_ok:
     VirtualFree(_mbase_PE_buffer, 0, MEM_RELEASE);
     VirtualFree(Copy_Text_VA, 0, MEM_RELEASE);
     printf("Done\n\n");
-    printf("用右ctrl + 箭头键更改限制:\n");
-    printf("  右ctrl + 上: +20\n");
-    printf("  右ctrl + 下: -20\n");
-    printf("  右ctrl + 左: -2\n");
-    printf("  右ctrl + 右: +2\n\n");
-
-    // 创建热键线程
-    HANDLE hThread = CreateThread(nullptr, 0, Thread1, &TargetFPS, 0, nullptr);
-    if (hThread)
-        CloseHandle(hThread);
 
     DWORD dwExitCode = STILL_ACTIVE;
     uint32_t fps = 0;
@@ -633,16 +509,16 @@ __offset_ok:
         GetExitCodeProcess(pi.hProcess, &dwExitCode);
 
         // 每两秒检查一次
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        Sleep(2000);
         int fps = 0;
-        ReadProcessMemory(pi.hProcess, (LPVOID)pfps, &fps, sizeof(fps), nullptr);
+        ReadProcessMemory(pi.hProcess, (LPVOID)pfps, &fps, sizeof(fps), NULL);
         if (fps == -1)
             continue;
         if (fps != TargetFPS)
         {
-            WriteProcessMemory(pi.hProcess, (LPVOID)pfps, &TargetFPS, sizeof(TargetFPS), nullptr);
+            WriteProcessMemory(pi.hProcess, (LPVOID)pfps, &TargetFPS, sizeof(TargetFPS), NULL);
             //热修补循环
-            WriteProcessMemory(pi.hProcess, (LPVOID)Patch_ptr, &TargetFPS, 4, nullptr);
+            WriteProcessMemory(pi.hProcess, (LPVOID)Patch_ptr, &TargetFPS, 4, NULL);
         }
             
 
